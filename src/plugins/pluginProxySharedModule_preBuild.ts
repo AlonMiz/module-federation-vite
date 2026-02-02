@@ -1,4 +1,4 @@
-import { Plugin, UserConfig } from 'vite';
+import { Plugin, ResolvedConfig, UserConfig } from 'vite';
 import { mapCodeToCodeWithSourcemap } from '../utils/mapCodeToCodeWithSourcemap';
 import { NormalizedShared } from '../utils/normalizeModuleFederationOptions';
 import { PromiseStore } from '../utils/PromiseStore';
@@ -20,8 +20,11 @@ export function proxySharedModule(options: {
   include?: string | string[];
   exclude?: string | string[];
 }): Plugin[] {
-  let { shared = {}, include, exclude } = options;
-  let _config: UserConfig;
+  const { shared = {} } = options;
+  let _config: ResolvedConfig | undefined;
+  let _command = 'serve';
+  const savePrebuild = new PromiseStore<string>();
+
   return [
     {
       name: 'generateLocalSharedImportMap',
@@ -42,14 +45,16 @@ export function proxySharedModule(options: {
     {
       name: 'proxyPreBuildShared',
       enforce: 'post',
-      configResolved(config) {
-        _config = config as any;
-      },
       config(config: UserConfig, { command }) {
+        // Store command for use in configResolved
+        _command = command;
+
+        // Set up aliases in config hook (required for alias configuration)
+        // But DON'T write virtual modules here - VirtualModule infrastructure isn't ready yet
         (config.resolve as any).alias.push(
           ...Object.keys(shared).map((key) => {
             const pattern = key.endsWith('/')
-              ? `(^${key.replace(/\/$/, '')}(\/.+)?$)`
+              ? `(^${key.replace(/\/$/, '')}(/.+)?$)`
               : `(^${key}$)`;
             return {
               // Intercept all shared requests and proxy them to loadShare
@@ -58,6 +63,7 @@ export function proxySharedModule(options: {
               customResolver(source: string, importer: string) {
                 if (/\.css$/.test(source)) return;
                 const loadSharePath = getLoadShareModulePath(source);
+                // We still call these here to handle deep imports or dynamic updates
                 writeLoadShareModule(source, shared[key], command);
                 writePreBuildLibPath(source);
                 addUsedShares(source);
@@ -67,7 +73,6 @@ export function proxySharedModule(options: {
             };
           })
         );
-        const savePrebuild = new PromiseStore<string>();
 
         (config.resolve as any).alias.push(
           ...Object.keys(shared).map((key) => {
@@ -89,7 +94,8 @@ export function proxySharedModule(options: {
                     const result = await (this as any)
                       .resolve(pkgName, importer)
                       .then((item: any) => item.id);
-                    if (!result.includes(_config.cacheDir)) {
+                    // _config is guaranteed to be set by configResolved before customResolver is called
+                    if (_config && !result.includes(_config.cacheDir)) {
                       // save pre-bunding module id
                       savePrebuild.set(pkgName, Promise.resolve(result));
                     }
@@ -99,6 +105,26 @@ export function proxySharedModule(options: {
                 };
           })
         );
+      },
+      configResolved(config) {
+        _config = config;
+
+        // Eagerly populate usedShares and generate virtual modules AFTER VirtualModule is initialized
+        // This ensures that even if Vite uses the cache (and skips customResolver),
+        // the plugin state is correctly initialized.
+        // This runs after the 'vite:module-federation-config' plugin's configResolved hook
+        // which calls VirtualModule.setRoot() and VirtualModule.ensureVirtualPackageExists()
+        console.log(
+          `[Module Federation] Eagerly populating usedShares for ${Object.keys(shared).length} shared modules`
+        );
+        Object.keys(shared).forEach((key) => {
+          console.log(`[Module Federation] Writing virtual modules for shared: ${key}`);
+          writeLoadShareModule(key, shared[key], _command);
+          writePreBuildLibPath(key);
+          addUsedShares(key);
+        });
+        writeLocalSharedImportMap();
+        console.log(`[Module Federation] Finished eagerly populating usedShares`);
       },
     },
   ];

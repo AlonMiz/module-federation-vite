@@ -3,8 +3,8 @@ import { dirname, join, parse, resolve, basename } from 'pathe';
 import { packageNameDecode, packageNameEncode } from '../utils/packageNameUtils';
 import { getNormalizeModuleFederationOptions } from './normalizeModuleFederationOptions';
 
-// Cache root path
-let rootDir: string | undefined;
+// Cache root path - defaults to process.cwd() to allow early initialization
+let rootDir: string = process.cwd();
 
 function findNodeModulesDir(root: string = process.cwd()) {
   let currentDir = root;
@@ -28,6 +28,37 @@ function getNodeModulesDir() {
     cachedNodeModulesDir = findNodeModulesDir(rootDir);
   }
   return cachedNodeModulesDir;
+}
+
+/**
+ * Initialize VirtualModule infrastructure early (before config hook).
+ * This allows virtual modules to be created before Vite's optimization phase.
+ * @param root - Optional root path, defaults to process.cwd()
+ * @param virtualModuleDir - The virtual module directory name
+ */
+export function initVirtualModuleInfrastructure(
+  root: string = process.cwd(),
+  virtualModuleDir: string = '__mf__virtual'
+) {
+  rootDir = root;
+  cachedNodeModulesDir = undefined; // Reset cache
+
+  const nodeModulesDir = getNodeModulesDir();
+  const virtualPackagePath = resolve(nodeModulesDir, virtualModuleDir);
+
+  if (!existsSync(virtualPackagePath)) {
+    mkdirSync(virtualPackagePath, { recursive: true });
+    writeFileSync(resolve(virtualPackagePath, 'empty.js'), '');
+    writeFileSync(
+      resolve(virtualPackagePath, 'package.json'),
+      JSON.stringify({
+        name: virtualModuleDir,
+        main: 'empty.js',
+      })
+    );
+  }
+
+  return virtualPackagePath;
 }
 
 export function getSuffix(name: string): string {
